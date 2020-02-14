@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -40,13 +41,13 @@ type syncer interface {
 }
 
 type dumper struct {
-	out  io.Writer
+	out  *bufio.Writer
 	sync syncer
 	mux  sync.Mutex
 }
 
 func newDumper(w io.Writer, sync bool) *dumper {
-	d := &dumper{out: w}
+	d := &dumper{out: bufio.NewWriter(w)}
 	if sync {
 		if s, ok := w.(syncer); ok {
 			d.sync = s
@@ -67,21 +68,20 @@ func (d *dumper) dump(mirror string, req *http.Request, resp *http.Response) err
 	if err != nil {
 		return fmt.Errorf("cannot dump request: %v", err)
 	}
-	if _, err := fmt.Fprintf(d.out, "***** Request %s *****\n", mirror); err != nil {
-		return fmt.Errorf("cannot write round-trip header: %v", err)
-	}
-	if _, err := d.out.Write(body); err != nil {
-		return fmt.Errorf("cannot write request: %v", err)
-	}
+
+	fmt.Fprintf(d.out, "***** Request %s *****\n", mirror)
+	d.out.Write(body)
+
 	body, err = httputil.DumpResponse(resp, true)
 	if err != nil {
 		return fmt.Errorf("cannot dump response: %v", err)
 	}
-	if _, err := d.out.Write(body); err != nil {
-		return fmt.Errorf("cannot write response: %v", err)
-	}
-	if _, err := d.out.Write([]byte("\n\n")); err != nil {
-		return fmt.Errorf("cannot write separator: %v", err)
+
+	d.out.Write(body)
+	d.out.Write([]byte("\n\n"))
+
+	if err := d.out.Flush(); err != nil {
+		return fmt.Errorf("cannot flush buffer: %v", err)
 	}
 	if d.sync != nil {
 		if err := d.sync.Sync(); err != nil {
