@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
 )
 
@@ -28,6 +29,24 @@ func makeSelfTestServers() (string, string) {
 	return backendServer.URL, mirrorServer.URL
 }
 
+func handleSigterm(stop func()) <-chan struct{} {
+	done := make(chan struct{})
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		var called bool
+		for range c {
+			if called {
+				continue
+			}
+			called = true
+			stop()
+			close(done)
+		}
+	}()
+	return done
+}
+
 func prefixEnv(prefix string, getenv func(string) string) func(*flag.Flag) {
 	prefix = prefix + "_"
 	return func(f *flag.Flag) {
@@ -41,8 +60,6 @@ func prefixEnv(prefix string, getenv func(string) string) func(*flag.Flag) {
 		}
 	}
 }
-
-// TODO: graceful shutdown
 
 func main() {
 	health := flag.String("health", ":7979", "Listen IP:PORT for health check, empty to disable")
@@ -80,7 +97,19 @@ func main() {
 		<-healthStarted
 	}
 
-	srv := makeProxy(metrics, ms, *listen, *insecure, *dump, proxyURL, proxyBuf)
-	fmt.Printf("%s, mirroring to %v\n", *proxyHost, ms)
-	log.Fatal(srv.ListenAndServe())
+	proxy := newProxy(metrics, ms, *listen, *insecure, *dump, proxyURL, proxyBuf)
+
+	exited := handleSigterm(func() {
+		if err := proxy.stop(); err != nil {
+			log.Printf("cannot shutdown gracefully: %v", err)
+		}
+	})
+
+	log.Printf("%s, mirroring to %v\n", *proxyHost, ms)
+	log.Printf("info: listening on %s", *listen)
+
+	if err := proxy.listenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("error: cannot start HTTP server: %v", err)
+	}
+	<-exited
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -96,6 +97,7 @@ type mirrorTransport struct {
 	transport http.RoundTripper
 	reqs      chan *mirrorRequest
 	dumper    *dumper
+	wg        sync.WaitGroup
 }
 
 type readCloser struct {
@@ -116,6 +118,7 @@ func newMirrorTransport(metrics *metrics, mirrors map[string]*url.URL, nworkers 
 		dumper:    dumper,
 		reqs:      make(chan *mirrorRequest, nbuf),
 	}
+	mt.wg.Add(nworkers)
 	for i := 0; i < nworkers; i++ {
 		go mt.consumeRequests()
 	}
@@ -135,6 +138,15 @@ func (m *mirrorTransport) consumeRequests() {
 			log.Printf("error: %s: cannot dump round trip: %v", mreq.mirror, err)
 		}
 	}
+	m.wg.Done()
+}
+
+func (m *mirrorTransport) stop() {
+	close(m.reqs)
+}
+
+func (m *mirrorTransport) wait() {
+	m.wg.Wait()
 }
 
 func cloneRequest(req *http.Request) *http.Request {
@@ -205,11 +217,35 @@ func makeDumper(dump string) *dumper {
 	return newDumper(dumpOut, dumpSync)
 }
 
-func makeProxy(metrics *metrics, ms map[string]*url.URL, listen string, insecure bool, dump string, proxyURL *url.URL, proxyBuf int) *http.Server {
-	proxy := httputil.NewSingleHostReverseProxy(proxyURL)
-	proxy.Transport = newMirrorTransport(metrics, ms, len(ms), makeTransport(insecure), makeDumper(dump), proxyBuf)
-	return &http.Server{
+type proxy struct {
+	srv       *http.Server
+	transport *mirrorTransport
+}
+
+func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, insecure bool, dump string, proxyURL *url.URL, proxyBuf int) *proxy {
+	httpTransport := makeTransport(insecure)
+	mt := newMirrorTransport(metrics, ms, len(ms), httpTransport, makeDumper(dump), proxyBuf)
+	upstream := httputil.NewSingleHostReverseProxy(proxyURL)
+	upstream.Transport = mt
+	srv := &http.Server{
 		Addr:    listen,
-		Handler: proxy,
+		Handler: upstream,
 	}
+	return &proxy{
+		srv:       srv,
+		transport: mt,
+	}
+}
+
+func (p *proxy) stop() error {
+	if err := p.srv.Shutdown(context.Background()); err != nil {
+		return fmt.Errorf("cannot stop HTTP server: %v", err)
+	}
+	p.transport.stop()
+	p.transport.wait()
+	return nil
+}
+
+func (p *proxy) listenAndServe() error {
+	return p.srv.ListenAndServe()
 }
