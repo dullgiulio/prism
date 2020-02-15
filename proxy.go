@@ -97,6 +97,7 @@ type mirrorTransport struct {
 	transport http.RoundTripper
 	reqs      chan *mirrorRequest
 	dumper    *dumper
+	dumpProxy bool
 	wg        sync.WaitGroup
 }
 
@@ -110,12 +111,13 @@ type mirrorRequest struct {
 	mirror string
 }
 
-func newMirrorTransport(metrics *metrics, mirrors map[string]*url.URL, nworkers int, transport http.RoundTripper, dumper *dumper, nbuf int) *mirrorTransport {
+func newMirrorTransport(metrics *metrics, mirrors map[string]*url.URL, nworkers int, transport http.RoundTripper, dumper *dumper, dumpProxy bool, nbuf int) *mirrorTransport {
 	mt := &mirrorTransport{
 		metrics:   metrics,
 		mirrors:   mirrors,
 		transport: transport,
 		dumper:    dumper,
+		dumpProxy: dumpProxy,
 		reqs:      make(chan *mirrorRequest, nbuf),
 	}
 	mt.wg.Add(nworkers)
@@ -175,6 +177,9 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	m.metrics.successUpstream(bodyBuf.Len())
+	if m.dumpProxy {
+		m.dumper.dump("rproxy", req, resp)
+	}
 	for mirror, murl := range m.mirrors {
 		cloneReq := cloneRequest(req)
 		cloneReq.URL = murl
@@ -222,9 +227,9 @@ type proxy struct {
 	transport *mirrorTransport
 }
 
-func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, insecure bool, dump string, proxyURL *url.URL, proxyBuf int) *proxy {
+func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, insecure bool, dump string, dumpProxy bool, proxyURL *url.URL, proxyBuf int) *proxy {
 	httpTransport := makeTransport(insecure)
-	mt := newMirrorTransport(metrics, ms, len(ms), httpTransport, makeDumper(dump), proxyBuf)
+	mt := newMirrorTransport(metrics, ms, len(ms), httpTransport, makeDumper(dump), dumpProxy, proxyBuf)
 	upstream := httputil.NewSingleHostReverseProxy(proxyURL)
 	upstream.Transport = mt
 	srv := &http.Server{

@@ -69,6 +69,7 @@ func main() {
 	selfTest := flag.Bool("self-test", false, "Self test mode")
 	insecure := flag.Bool("insecure", false, "Allow invalid TLS certificates")
 	dump := flag.String("dump", "", "Dump request/responses from mirrors in file; empty disables dumping, '-' means stdout")
+	dumpProxy := flag.Bool("dump-proxy", false, "Also dump proxied request to -dump file")
 
 	flag.VisitAll(prefixEnv("PRISM", os.Getenv))
 	flag.Parse()
@@ -97,7 +98,7 @@ func main() {
 		<-healthStarted
 	}
 
-	proxy := newProxy(metrics, ms, *listen, *insecure, *dump, proxyURL, proxyBuf)
+	proxy := newProxy(metrics, ms, *listen, *insecure, *dump, *dumpProxy, proxyURL, proxyBuf)
 
 	exited := handleSigterm(func() {
 		if err := proxy.stop(); err != nil {
