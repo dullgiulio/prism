@@ -92,6 +92,7 @@ func (d *dumper) dump(mirror string, req *http.Request, resp *http.Response) err
 }
 
 type mirrorTransport struct {
+	proxyURL  *url.URL
 	metrics   *metrics
 	mirrors   map[string]*url.URL
 	transport http.RoundTripper
@@ -111,8 +112,9 @@ type mirrorRequest struct {
 	mirror string
 }
 
-func newMirrorTransport(metrics *metrics, mirrors map[string]*url.URL, nworkers int, transport http.RoundTripper, dumper *dumper, dumpProxy bool, nbuf int) *mirrorTransport {
+func newMirrorTransport(proxyURL *url.URL, metrics *metrics, mirrors map[string]*url.URL, nworkers int, transport http.RoundTripper, dumper *dumper, dumpProxy bool, nbuf int) *mirrorTransport {
 	mt := &mirrorTransport{
+		proxyURL:  proxyURL,
 		metrics:   metrics,
 		mirrors:   mirrors,
 		transport: transport,
@@ -170,6 +172,7 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		tee := io.TeeReader(req.Body, &bodyBuf)
 		req.Body = &readCloser{tee, req.Body}
 	}
+	req.Host = m.proxyURL.Host
 	resp, err := m.transport.RoundTrip(req)
 	if err != nil {
 		log.Printf("error: round-trip failed, won't be sent to mirrors: %v", err)
@@ -178,6 +181,8 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	m.metrics.successUpstream(bodyBuf.Len())
 	if m.dumpProxy {
+		// request body has been closed, need to restore it for dumping
+		req.Body = ioutil.NopCloser(bytes.NewReader(bodyBuf.Bytes()))
 		m.dumper.dump("rproxy", req, resp)
 	}
 	for mirror, murl := range m.mirrors {
@@ -229,7 +234,7 @@ type proxy struct {
 
 func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, insecure bool, dump string, dumpProxy bool, proxyURL *url.URL, proxyBuf int) *proxy {
 	httpTransport := makeTransport(insecure)
-	mt := newMirrorTransport(metrics, ms, len(ms), httpTransport, makeDumper(dump), dumpProxy, proxyBuf)
+	mt := newMirrorTransport(proxyURL, metrics, ms, len(ms), httpTransport, makeDumper(dump), dumpProxy, proxyBuf)
 	upstream := httputil.NewSingleHostReverseProxy(proxyURL)
 	upstream.Transport = mt
 	srv := &http.Server{
