@@ -153,6 +153,16 @@ func (m *mirrorTransport) wait() {
 	m.wg.Wait()
 }
 
+func removeConnectionHeaders(h http.Header) {
+	for _, f := range h["Connection"] {
+		for _, sf := range strings.Split(f, ",") {
+			if sf = strings.TrimSpace(sf); sf != "" {
+				h.Del(sf)
+			}
+		}
+	}
+}
+
 func cloneRequest(req *http.Request) *http.Request {
 	var r http.Request
 	r.Method = req.Method
@@ -163,6 +173,7 @@ func cloneRequest(req *http.Request) *http.Request {
 	r.Header = req.Header
 	r.TransferEncoding = req.TransferEncoding
 	r.Trailer = req.Trailer
+	removeConnectionHeaders(r.Header)
 	return &r
 }
 
