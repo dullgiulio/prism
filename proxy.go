@@ -108,11 +108,19 @@ type readCloser struct {
 }
 
 type mirrorRequest struct {
-	req    *http.Request
-	mirror string
+	req      *http.Request
+	mirror   string
+	contents []byte
 }
 
-func newMirrorTransport(proxyURL *url.URL, metrics *metrics, mirrors map[string]*url.URL, nworkers int, transport http.RoundTripper, dumper *dumper, dumpProxy bool, nbuf int) *mirrorTransport {
+func (m *mirrorRequest) roundTrip(rt http.RoundTripper) (*http.Response, error) {
+	if m.contents != nil {
+		m.req.Body = ioutil.NopCloser(bytes.NewReader(m.contents))
+	}
+	return rt.RoundTrip(m.req)
+}
+
+func newMirrorTransport(proxyURL *url.URL, metrics *metrics, mirrors map[string]*url.URL, nworkers int, transport http.RoundTripper, retries int, dumper *dumper, dumpProxy bool, nbuf int) *mirrorTransport {
 	mt := &mirrorTransport{
 		proxyURL:  proxyURL,
 		metrics:   metrics,
@@ -124,16 +132,26 @@ func newMirrorTransport(proxyURL *url.URL, metrics *metrics, mirrors map[string]
 	}
 	mt.wg.Add(nworkers)
 	for i := 0; i < nworkers; i++ {
-		go mt.consumeRequests()
+		go mt.consumeRequests(retries)
 	}
 	return mt
 }
 
-func (m *mirrorTransport) consumeRequests() {
+func (m *mirrorTransport) retry(mreq *mirrorRequest, ntimes int) (*http.Response, bool) {
+	for i := 0; i < ntimes; i++ {
+		resp, err := mreq.roundTrip(m.transport)
+		if err == nil {
+			return resp, true
+		}
+		log.Printf("error: %s: request to mirror failed (%d/%d): %v", mreq.mirror, i, ntimes, err)
+	}
+	return nil, false
+}
+
+func (m *mirrorTransport) consumeRequests(ntimes int) {
 	for mreq := range m.reqs {
-		resp, err := m.transport.RoundTrip(mreq.req)
-		if err != nil {
-			log.Printf("error: %s: request to mirror failed: %v", mreq.mirror, err)
+		resp, success := m.retry(mreq, ntimes)
+		if !success {
 			m.metrics.failMirror(mreq.mirror)
 			continue
 		}
@@ -197,12 +215,13 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		m.dumper.dump("rproxy", req, resp)
 	}
 	for mirror, murl := range m.mirrors {
+		var contents []byte
 		cloneReq := cloneRequest(req)
 		cloneReq.URL = murl
 		if req.Body != nil {
-			cloneReq.Body = ioutil.NopCloser(bytes.NewReader(bodyBuf.Bytes()))
+			contents = bodyBuf.Bytes()
 		}
-		m.reqs <- &mirrorRequest{mirror: mirror, req: cloneReq}
+		m.reqs <- &mirrorRequest{mirror: mirror, req: cloneReq, contents: contents}
 	}
 	return resp, nil
 }
@@ -244,9 +263,9 @@ type proxy struct {
 	transport *mirrorTransport
 }
 
-func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, insecure bool, maxConn int, dump string, dumpProxy bool, proxyURL *url.URL, proxyBuf int) *proxy {
+func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, retries int, insecure bool, maxConn int, dump string, dumpProxy bool, proxyURL *url.URL, proxyBuf int) *proxy {
 	httpTransport := makeTransport(insecure, maxConn)
-	mt := newMirrorTransport(proxyURL, metrics, ms, len(ms), httpTransport, makeDumper(dump), dumpProxy, proxyBuf)
+	mt := newMirrorTransport(proxyURL, metrics, ms, len(ms), httpTransport, retries, makeDumper(dump), dumpProxy, proxyBuf)
 	upstream := httputil.NewSingleHostReverseProxy(proxyURL)
 	upstream.Transport = mt
 	srv := &http.Server{
