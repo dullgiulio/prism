@@ -196,8 +196,9 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-func makeTransport(insecure bool) *http.Transport {
+func makeTransport(insecure bool, maxConn int) *http.Transport {
 	transport := *http.DefaultTransport.(*http.Transport)
+	transport.MaxIdleConnsPerHost = maxConn
 	transport.ForceAttemptHTTP2 = false
 	if insecure {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -232,8 +233,8 @@ type proxy struct {
 	transport *mirrorTransport
 }
 
-func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, insecure bool, dump string, dumpProxy bool, proxyURL *url.URL, proxyBuf int) *proxy {
-	httpTransport := makeTransport(insecure)
+func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, insecure bool, maxConn int, dump string, dumpProxy bool, proxyURL *url.URL, proxyBuf int) *proxy {
+	httpTransport := makeTransport(insecure, maxConn)
 	mt := newMirrorTransport(proxyURL, metrics, ms, len(ms), httpTransport, makeDumper(dump), dumpProxy, proxyBuf)
 	upstream := httputil.NewSingleHostReverseProxy(proxyURL)
 	upstream.Transport = mt

@@ -70,6 +70,7 @@ func main() {
 	insecure := flag.Bool("insecure", false, "Allow invalid TLS certificates")
 	dump := flag.String("dump", "", "Dump request/responses from mirrors in file; empty disables dumping, '-' means stdout")
 	dumpProxy := flag.Bool("dump-proxy", false, "Also dump proxied request to -dump file")
+	maxConn := flag.Int("max-conn", 200, "Maximum number of connections to upstream servers")
 
 	flag.VisitAll(prefixEnv("PRISM", os.Getenv))
 	flag.Parse()
@@ -98,7 +99,7 @@ func main() {
 		<-healthStarted
 	}
 
-	proxy := newProxy(metrics, ms, *listen, *insecure, *dump, *dumpProxy, proxyURL, proxyBuf)
+	proxy := newProxy(metrics, ms, *listen, *insecure, *maxConn, *dump, *dumpProxy, proxyURL, proxyBuf)
 
 	exited := handleSigterm(func() {
 		if err := proxy.stop(); err != nil {
