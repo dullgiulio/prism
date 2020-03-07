@@ -15,13 +15,13 @@ import (
 
 func makeSelfTestServers() (string, string) {
 	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "this call was relayed by the reverse proxy")
+		fmt.Fprintf(w, "this call was relayed by the reverse proxy\n\n")
 		if _, err := io.Copy(w, r.Body); err != nil {
 			log.Fatalf("cannot copy body in mirror server: %v", err)
 		}
 	}))
 	mirrorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "mirror server\n")
+		fmt.Fprintf(w, "mirror server\n\n")
 		if _, err := io.Copy(w, r.Body); err != nil {
 			log.Fatalf("cannot copy body in mirror server: %v", err)
 		}
