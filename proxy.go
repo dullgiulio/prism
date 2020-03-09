@@ -9,14 +9,12 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
-	"time"
 )
 
 func hostWithoutPort(host string) string {
@@ -229,19 +227,9 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func makeTransport(insecure bool, maxConn int) *http.Transport {
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-			DualStack: true,
-		}).DialContext,
-		ForceAttemptHTTP2:     false,
-		MaxIdleConns:          maxConn,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ForceAttemptHTTP2 = false
+	transport.MaxIdleConns = maxConn
 	if insecure {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
