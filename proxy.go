@@ -208,7 +208,6 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		m.metrics.failUpstream()
 		return nil, err
 	}
-	m.metrics.successUpstream(bodyBuf.Len())
 	if m.dumpProxy {
 		// request body has been closed, need to restore it for dumping
 		req.Body = ioutil.NopCloser(bytes.NewReader(bodyBuf.Bytes()))
@@ -223,6 +222,7 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		m.reqs <- &mirrorRequest{mirror: mirror, req: cloneReq, contents: contents}
 	}
+	m.metrics.successUpstream(bodyBuf.Len())
 	return resp, nil
 }
 
