@@ -159,6 +159,7 @@ func (m *mirrorTransport) consumeRequests(ntimes int) {
 		if err := m.dumper.dump(mreq.mirror, mreq.req, resp); err != nil {
 			log.Printf("error: %s: cannot dump round trip: %v", mreq.mirror, err)
 		}
+		resp.Body.Close()
 	}
 	m.wg.Done()
 }
