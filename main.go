@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 )
 
 func makeSelfTestServers() (string, string) {
@@ -71,6 +72,7 @@ func main() {
 	dump := flag.String("dump", "", "Dump request/responses from mirrors in file; empty disables dumping, '-' means stdout")
 	dumpProxy := flag.Bool("dump-proxy", false, "Also dump proxied request to -dump file")
 	maxConn := flag.Int("max-conn", 200, "Maximum number of connections to upstream servers")
+	timeout := flag.Duration("mirror-timeout", 10*time.Second, "Timeout to send requests to mirrors")
 	retries := flag.Int("mirror-retries", 3, "Maximum number of retries against mirrors")
 
 	flag.VisitAll(prefixEnv("PRISM", os.Getenv))
@@ -100,7 +102,7 @@ func main() {
 		<-healthStarted
 	}
 
-	client := makeClient(*insecure, *maxConn)
+	client := makeClient(*insecure, *maxConn, *timeout)
 	proxy := newProxy(metrics, ms, *listen, *retries, client, *dump, *dumpProxy, proxyURL, proxyBuf)
 
 	exited := handleSigterm(func() {

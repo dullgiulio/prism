@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 func hostWithoutPort(host string) string {
@@ -227,7 +228,7 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-func makeClient(insecure bool, maxConn int) *http.Client {
+func makeClient(insecure bool, maxConn int, timeout time.Duration) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ForceAttemptHTTP2 = false
 	transport.MaxIdleConns = maxConn
@@ -235,6 +236,7 @@ func makeClient(insecure bool, maxConn int) *http.Client {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	return &http.Client{
+		Timeout:   timeout,
 		Transport: transport,
 	}
 }
@@ -271,8 +273,11 @@ func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, retries i
 	upstream := httputil.NewSingleHostReverseProxy(proxyURL)
 	upstream.Transport = mt
 	srv := &http.Server{
-		Addr:    listen,
-		Handler: upstream,
+		Addr:         listen,
+		Handler:      upstream,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  10 * time.Second,
 	}
 	return &proxy{
 		srv:       srv,
