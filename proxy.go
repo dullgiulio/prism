@@ -95,7 +95,7 @@ type mirrorTransport struct {
 	proxyURL  *url.URL
 	metrics   *metrics
 	mirrors   map[string]*url.URL
-	transport http.RoundTripper
+	client    *http.Client
 	reqs      chan *mirrorRequest
 	dumper    *dumper
 	dumpProxy bool
@@ -113,19 +113,19 @@ type mirrorRequest struct {
 	contents []byte
 }
 
-func (m *mirrorRequest) roundTrip(rt http.RoundTripper) (*http.Response, error) {
+func (m *mirrorRequest) roundTrip(client *http.Client) (*http.Response, error) {
 	if m.contents != nil {
 		m.req.Body = ioutil.NopCloser(bytes.NewReader(m.contents))
 	}
-	return rt.RoundTrip(m.req)
+	return client.Do(m.req)
 }
 
-func newMirrorTransport(proxyURL *url.URL, metrics *metrics, mirrors map[string]*url.URL, nworkers int, transport http.RoundTripper, retries int, dumper *dumper, dumpProxy bool, nbuf int) *mirrorTransport {
+func newMirrorTransport(proxyURL *url.URL, metrics *metrics, mirrors map[string]*url.URL, nworkers int, client *http.Client, retries int, dumper *dumper, dumpProxy bool, nbuf int) *mirrorTransport {
 	mt := &mirrorTransport{
 		proxyURL:  proxyURL,
 		metrics:   metrics,
 		mirrors:   mirrors,
-		transport: transport,
+		client:    client,
 		dumper:    dumper,
 		dumpProxy: dumpProxy,
 		reqs:      make(chan *mirrorRequest, nbuf),
@@ -139,7 +139,7 @@ func newMirrorTransport(proxyURL *url.URL, metrics *metrics, mirrors map[string]
 
 func (m *mirrorTransport) retry(mreq *mirrorRequest, ntimes int) (*http.Response, bool) {
 	for i := 0; i < ntimes; i++ {
-		resp, err := mreq.roundTrip(m.transport)
+		resp, err := mreq.roundTrip(m.client)
 		if err == nil {
 			return resp, true
 		}
@@ -203,7 +203,7 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req.Body = &readCloser{tee, req.Body}
 	}
 	req.Host = m.proxyURL.Host
-	resp, err := m.transport.RoundTrip(req)
+	resp, err := m.client.Transport.RoundTrip(req)
 	if err != nil {
 		log.Printf("error: round-trip failed, won't be sent to mirrors: %v", err)
 		m.metrics.failUpstream()
@@ -227,14 +227,16 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-func makeTransport(insecure bool, maxConn int) *http.Transport {
+func makeClient(insecure bool, maxConn int) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ForceAttemptHTTP2 = false
 	transport.MaxIdleConns = maxConn
 	if insecure {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
-	return transport
+	return &http.Client{
+		Transport: transport,
+	}
 }
 
 func makeDumper(dump string) *dumper {
@@ -264,9 +266,8 @@ type proxy struct {
 	transport *mirrorTransport
 }
 
-func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, retries int, insecure bool, maxConn int, dump string, dumpProxy bool, proxyURL *url.URL, proxyBuf int) *proxy {
-	httpTransport := makeTransport(insecure, maxConn)
-	mt := newMirrorTransport(proxyURL, metrics, ms, len(ms), httpTransport, retries, makeDumper(dump), dumpProxy, proxyBuf)
+func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, retries int, client *http.Client, dump string, dumpProxy bool, proxyURL *url.URL, proxyBuf int) *proxy {
+	mt := newMirrorTransport(proxyURL, metrics, ms, len(ms), client, retries, makeDumper(dump), dumpProxy, proxyBuf)
 	upstream := httputil.NewSingleHostReverseProxy(proxyURL)
 	upstream.Transport = mt
 	srv := &http.Server{

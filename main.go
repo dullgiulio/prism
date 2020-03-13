@@ -100,7 +100,8 @@ func main() {
 		<-healthStarted
 	}
 
-	proxy := newProxy(metrics, ms, *listen, *retries, *insecure, *maxConn, *dump, *dumpProxy, proxyURL, proxyBuf)
+	client := makeClient(*insecure, *maxConn)
+	proxy := newProxy(metrics, ms, *listen, *retries, client, *dump, *dumpProxy, proxyURL, proxyBuf)
 
 	exited := handleSigterm(func() {
 		if err := proxy.stop(); err != nil {
