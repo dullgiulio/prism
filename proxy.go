@@ -104,9 +104,16 @@ type mirrorTransport struct {
 	wg        sync.WaitGroup
 }
 
-type readCloser struct {
+type triggerCloser struct {
 	io.Reader
-	io.Closer
+	closer     io.Closer
+	afterClose func()
+}
+
+func (tc *triggerCloser) Close() error {
+	err := tc.closer.Close()
+	tc.afterClose()
+	return err
 }
 
 type mirrorRequest struct {
@@ -207,13 +214,39 @@ func cloneRequest(req *http.Request) *http.Request {
 	return &r
 }
 
-func (m *mirrorTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	bodyBuf := filebuf.New(1 << 18)
-	req := cloneRequest(r)
-	if r.Body != nil {
-		tee := io.TeeReader(r.Body, bodyBuf)
-		req.Body = &readCloser{tee, r.Body}
+func (m *mirrorTransport) sendToMirrors(req *http.Request, bodyBuf *filebuf.Filebuf) func() {
+	return func() {
+		var bodyBufUsed bool
+		for mirror, murl := range m.mirrors {
+			var contents *filebuf.Filebuf
+			cloneReq := cloneRequest(req)
+			cloneReq.URL = murl
+			if req.Body != nil {
+				var err error
+				if !bodyBufUsed {
+					contents = bodyBuf
+					bodyBufUsed = true
+				} else {
+					contents, err = bodyBuf.Clone()
+				}
+				if err != nil {
+					log.Printf("cannot clone request body buffer, skip mirror %s: %v", mirror, err)
+					continue
+				}
+			}
+			m.reqs <- &mirrorRequest{mirror: mirror, req: cloneReq, contents: contents}
+		}
 	}
+}
+
+func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	bodyBuf := filebuf.New(1 << 18)
+	if req.Body != nil {
+		tee := io.TeeReader(req.Body, bodyBuf)
+		// requesto to be sent to mirrors is ready only when request body is fully consumed
+		req.Body = &triggerCloser{tee, req.Body, m.sendToMirrors(req, bodyBuf)}
+	}
+	req.RequestURI = ""
 	req.URL = m.proxyURL
 	req.Host = m.proxyURL.Host
 	resp, err := m.client.Do(req)
@@ -233,22 +266,7 @@ func (m *mirrorTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 			}
 		}
 	*/
-	count := 0
-	for mirror, murl := range m.mirrors {
-		var contents *filebuf.Filebuf
-		cloneReq := cloneRequest(req)
-		cloneReq.URL = murl
-		if req.Body != nil {
-			var err error
-			contents, err = bodyBuf.Clone()
-			if err != nil {
-				log.Printf("cannot clone request body buffer, skip mirror %s: %v", mirror, err)
-				continue
-			}
-		}
-		m.reqs <- &mirrorRequest{mirror: mirror, req: cloneReq, contents: contents}
-		count++
-	}
+
 	m.metrics.successUpstream(bodyBuf.Len())
 	return resp, nil
 }
