@@ -8,10 +8,12 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -104,21 +106,14 @@ type mirrorTransport struct {
 	wg        sync.WaitGroup
 }
 
-type triggerCloser struct {
+type readCloser struct {
 	io.Reader
-	closer     io.Closer
-	afterClose func()
-}
-
-func (tc *triggerCloser) Close() error {
-	err := tc.closer.Close()
-	tc.afterClose()
-	return err
+	io.Closer
 }
 
 type mirrorRequest struct {
-	req      *http.Request
 	mirror   string
+	req      *http.Request
 	contents *filebuf.Filebuf
 }
 
@@ -214,46 +209,86 @@ func cloneRequest(req *http.Request) *http.Request {
 	return &r
 }
 
-func (m *mirrorTransport) sendToMirrors(req *http.Request, bodyBuf *filebuf.Filebuf) func() {
-	return func() {
-		var bodyBufUsed bool
-		for mirror, murl := range m.mirrors {
-			var contents *filebuf.Filebuf
-			cloneReq := cloneRequest(req)
-			cloneReq.URL = murl
-			if req.Body != nil {
-				var err error
-				if !bodyBufUsed {
-					contents = bodyBuf
-					bodyBufUsed = true
-				} else {
-					contents, err = bodyBuf.Clone()
-				}
-				if err != nil {
-					log.Printf("cannot clone request body buffer, skip mirror %s: %v", mirror, err)
-					continue
-				}
+func (m *mirrorTransport) sendToMirrors(req *http.Request, bodyBuf *filebuf.Filebuf) {
+	var bodyBufUsed bool
+	for mirror, murl := range m.mirrors {
+		var contents *filebuf.Filebuf
+		cloneReq := cloneRequest(req)
+		cloneReq.URL = murl
+		if req.Body != nil {
+			var err error
+			if !bodyBufUsed {
+				contents = bodyBuf
+				bodyBufUsed = true
+			} else {
+				contents, err = bodyBuf.Clone()
 			}
-			m.reqs <- &mirrorRequest{mirror: mirror, req: cloneReq, contents: contents}
+			if err != nil {
+				log.Printf("cannot clone request body buffer, skip mirror %s: %v", mirror, err)
+				continue
+			}
+		}
+		m.reqs <- &mirrorRequest{mirror: mirror, req: cloneReq, contents: contents}
+	}
+}
+
+func copyHeader(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
 		}
 	}
 }
 
-func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+var hopHeaders = []string{
+	"Connection",
+	"Proxy-Connection", // non-standard but still sent by libcurl and rejected by e.g. google
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",      // canonicalized version of "TE"
+	"Trailer", // not Trailers per URL above; https://www.rfc-editor.org/errata_search.php?eid=4522
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+func (m *mirrorTransport) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	bodyBuf := filebuf.New(1 << 18)
 	if req.Body != nil {
 		tee := io.TeeReader(req.Body, bodyBuf)
-		// requesto to be sent to mirrors is ready only when request body is fully consumed
-		req.Body = &triggerCloser{tee, req.Body, m.sendToMirrors(req, bodyBuf)}
+		req.Body = &readCloser{tee, req.Body}
 	}
-	req.RequestURI = ""
-	req.URL = m.proxyURL
-	req.Host = m.proxyURL.Host
-	resp, err := m.client.Do(req)
+	req.URL.Scheme = m.proxyURL.Scheme
+	req.URL.Host = m.proxyURL.Host
+	req.URL.Path = path.Join(m.proxyURL.Path, req.URL.Path)
+	req.Close = false
+	if _, ok := req.Header["User-Agent"]; !ok {
+		// explicitly disable User-Agent so it's not set to default value
+		req.Header.Set("User-Agent", "")
+	}
+	for _, h := range hopHeaders {
+		hv := req.Header.Get(h)
+		if hv == "" {
+			continue
+		}
+		req.Header.Del(h)
+	}
+
+	if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+		// If we aren't the first proxy retain prior
+		// X-Forwarded-For information as a comma+space
+		// separated list and fold multiple headers into one.
+		if prior, ok := req.Header["X-Forwarded-For"]; ok {
+			clientIP = strings.Join(prior, ", ") + ", " + clientIP
+		}
+		req.Header.Set("X-Forwarded-For", clientIP)
+	}
+
+	resp, err := m.client.Transport.RoundTrip(req)
 	if err != nil {
 		log.Printf("error: round-trip failed, won't be sent to mirrors: %v", err)
 		m.metrics.failUpstream()
-		return nil, err
+		return
 	}
 	/*
 		if m.dumpProxy {
@@ -267,8 +302,17 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	*/
 
+	copyHeader(rw.Header(), resp.Header)
+	rw.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(rw, resp.Body); err != nil {
+		log.Printf("error: could not copy response back to client: %v", err)
+		m.metrics.failUpstream()
+		return
+	}
+	resp.Body.Close()
+
+	m.sendToMirrors(req, bodyBuf)
 	m.metrics.successUpstream(bodyBuf.Len())
-	return resp, nil
 }
 
 func makeClient(insecure bool, maxConn int, timeout time.Duration) *http.Client {
@@ -313,11 +357,9 @@ type proxy struct {
 
 func newProxy(metrics *metrics, ms map[string]*url.URL, listen string, retries int, client *http.Client, dump string, dumpProxy bool, proxyURL *url.URL, proxyBuf int) *proxy {
 	mt := newMirrorTransport(proxyURL, metrics, ms, len(ms), client, retries, makeDumper(dump), dumpProxy, proxyBuf)
-	upstream := httputil.NewSingleHostReverseProxy(proxyURL)
-	upstream.Transport = mt
 	srv := &http.Server{
 		Addr:         listen,
-		Handler:      upstream,
+		Handler:      mt,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  10 * time.Second,

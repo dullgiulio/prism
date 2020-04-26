@@ -12,19 +12,33 @@ import (
 	"os/signal"
 	"strings"
 	"time"
+
+	"github.com/dullgiulio/filebuf"
 )
 
 func makeSelfTestServers() (string, string) {
 	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "this call was relayed by the reverse proxy\n\n")
-		if _, err := io.Copy(w, r.Body); err != nil {
-			log.Fatalf("cannot copy body in backend server: %v", err)
+		fb := filebuf.New(1 << 12)
+		defer fb.Close()
+		fmt.Fprintf(fb, "this call was relayed by the reverse proxy\n\n")
+		if _, err := io.Copy(fb, r.Body); err != nil {
+			log.Fatalf("cannot copy body to client in backend server: %v", err)
+		}
+		defer r.Body.Close()
+		if _, err := io.Copy(w, fb); err != nil {
+			log.Fatalf("cannot copy body to client in backend server: %v", err)
 		}
 	}))
 	mirrorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fb := filebuf.New(1 << 12)
+		defer fb.Close()
 		fmt.Fprintf(w, "mirror server\n\n")
-		if _, err := io.Copy(w, r.Body); err != nil {
+		if _, err := io.Copy(fb, r.Body); err != nil {
 			log.Fatalf("cannot copy body in mirror server: %v", err)
+		}
+		defer r.Body.Close()
+		if _, err := io.Copy(w, fb); err != nil {
+			log.Fatalf("cannot copy body to client in backend server: %v", err)
 		}
 	}))
 	return backendServer.URL, mirrorServer.URL
