@@ -18,7 +18,7 @@ func makeSelfTestServers() (string, string) {
 	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "this call was relayed by the reverse proxy\n\n")
 		if _, err := io.Copy(w, r.Body); err != nil {
-			log.Fatalf("cannot copy body in mirror server: %v", err)
+			log.Fatalf("cannot copy body in backend server: %v", err)
 		}
 	}))
 	mirrorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

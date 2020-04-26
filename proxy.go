@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -16,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dullgiulio/filebuf"
 )
 
 func hostWithoutPort(host string) string {
@@ -111,12 +112,12 @@ type readCloser struct {
 type mirrorRequest struct {
 	req      *http.Request
 	mirror   string
-	contents []byte
+	contents *filebuf.Filebuf
 }
 
-func (m *mirrorRequest) roundTrip(client *http.Client) (*http.Response, error) {
+func (m *mirrorRequest) roundTrip(client *http.Client, contents *filebuf.Filebuf) (*http.Response, error) {
 	if m.contents != nil {
-		m.req.Body = ioutil.NopCloser(bytes.NewReader(m.contents))
+		m.req.Body = contents
 	}
 	return client.Do(m.req)
 }
@@ -138,29 +139,38 @@ func newMirrorTransport(proxyURL *url.URL, metrics *metrics, mirrors map[string]
 	return mt
 }
 
-func (m *mirrorTransport) retry(mreq *mirrorRequest, ntimes int) (*http.Response, bool) {
+func (m *mirrorTransport) retry(mreq *mirrorRequest, contents *filebuf.Filebuf, ntimes int) (*http.Response, error) {
 	for i := 0; i < ntimes; i++ {
-		resp, err := mreq.roundTrip(m.client)
+		resp, err := mreq.roundTrip(m.client, contents)
 		if err == nil {
-			return resp, true
+			return resp, nil
 		}
 		log.Printf("error: %s: request to mirror failed (%d/%d): %v", mreq.mirror, i, ntimes, err)
+		if err := contents.Rewind(); err != nil {
+			return nil, fmt.Errorf("error: cannot rewind body contents: %v", err)
+		}
 	}
-	return nil, false
+	return nil, fmt.Errorf("request failed after %d attempts", ntimes)
 }
 
 func (m *mirrorTransport) consumeRequests(ntimes int) {
 	for mreq := range m.reqs {
-		resp, success := m.retry(mreq, ntimes)
-		if !success {
+		resp, err := m.retry(mreq, mreq.contents, ntimes)
+		if err != nil {
+			log.Printf("error: %s: retries failed: %v", mreq.mirror, err)
 			m.metrics.failMirror(mreq.mirror)
 			continue
 		}
 		m.metrics.successMirror(mreq.mirror)
-		if err := m.dumper.dump(mreq.mirror, mreq.req, resp); err != nil {
-			log.Printf("error: %s: cannot dump round trip: %v", mreq.mirror, err)
+		//if err := m.dumper.dump(mreq.mirror, mreq.req, resp); err != nil {
+		//	log.Printf("error: %s: cannot dump round trip: %v", mreq.mirror, err)
+		//}
+		if _, err := io.Copy(ioutil.Discard, resp.Body); err != nil {
+			log.Printf("error: %s: cannot discard response body: %v", mreq.mirror, err)
 		}
-		resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("error: %s: cannot close mirror response body: %v", mreq.mirror, err)
+		}
 	}
 	m.wg.Done()
 }
@@ -197,32 +207,47 @@ func cloneRequest(req *http.Request) *http.Request {
 	return &r
 }
 
-func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	var bodyBuf bytes.Buffer
-	if req.Body != nil {
-		tee := io.TeeReader(req.Body, &bodyBuf)
-		req.Body = &readCloser{tee, req.Body}
+func (m *mirrorTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	bodyBuf := filebuf.New(1 << 18)
+	req := cloneRequest(r)
+	if r.Body != nil {
+		tee := io.TeeReader(r.Body, bodyBuf)
+		req.Body = &readCloser{tee, r.Body}
 	}
+	req.URL = m.proxyURL
 	req.Host = m.proxyURL.Host
-	resp, err := m.client.Transport.RoundTrip(req)
+	resp, err := m.client.Do(req)
 	if err != nil {
 		log.Printf("error: round-trip failed, won't be sent to mirrors: %v", err)
 		m.metrics.failUpstream()
 		return nil, err
 	}
-	if m.dumpProxy {
-		// request body has been closed, need to restore it for dumping
-		req.Body = ioutil.NopCloser(bytes.NewReader(bodyBuf.Bytes()))
-		m.dumper.dump("rproxy", req, resp)
-	}
+	/*
+		if m.dumpProxy {
+			// request body has been closed, need to restore it for dumping
+			req.Body = bodyBuf
+			m.dumper.dump("rproxy", req, resp)
+			if err := bodyBuf.Rewind(); err != nil {
+				log.Printf("cannot rewind request body after dump, won't be sent to mirrors: %w", err)
+				return resp, nil
+			}
+		}
+	*/
+	count := 0
 	for mirror, murl := range m.mirrors {
-		var contents []byte
+		var contents *filebuf.Filebuf
 		cloneReq := cloneRequest(req)
 		cloneReq.URL = murl
 		if req.Body != nil {
-			contents = bodyBuf.Bytes()
+			var err error
+			contents, err = bodyBuf.Clone()
+			if err != nil {
+				log.Printf("cannot clone request body buffer, skip mirror %s: %v", mirror, err)
+				continue
+			}
 		}
 		m.reqs <- &mirrorRequest{mirror: mirror, req: cloneReq, contents: contents}
+		count++
 	}
 	m.metrics.successUpstream(bodyBuf.Len())
 	return resp, nil

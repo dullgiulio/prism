@@ -52,7 +52,7 @@ func newMetrics(namespace string) *metrics {
 	return m
 }
 
-func (m *metrics) successUpstream(size int) {
+func (m *metrics) successUpstream(size int64) {
 	m.received.Inc()
 	m.recvSize.Add(float64(size))
 }
