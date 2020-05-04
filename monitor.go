@@ -9,7 +9,7 @@ import (
 )
 
 type metrics struct {
-	received       prometheus.Counter
+	received       *prometheus.CounterVec
 	receivedMirror *prometheus.CounterVec
 	recvSize       prometheus.Counter
 	failedUpstream prometheus.Counter
@@ -18,11 +18,11 @@ type metrics struct {
 
 func newMetrics(namespace string) *metrics {
 	m := &metrics{
-		received: prometheus.NewCounter(prometheus.CounterOpts{
+		received: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "received",
 			Help:      "Number of received requests successfully proxied",
-		}),
+		}, []string{"code"}),
 		receivedMirror: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "received_mirror",
@@ -52,8 +52,8 @@ func newMetrics(namespace string) *metrics {
 	return m
 }
 
-func (m *metrics) successUpstream(size int) {
-	m.received.Inc()
+func (m *metrics) successUpstream(size int, code string) {
+	m.received.With(prometheus.Labels{"code": code}).Inc()
 	m.recvSize.Add(float64(size))
 }
 

@@ -224,7 +224,7 @@ func (m *mirrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		m.reqs <- &mirrorRequest{mirror: mirror, req: cloneReq, contents: contents}
 	}
-	m.metrics.successUpstream(bodyBuf.Len())
+	m.metrics.successUpstream(bodyBuf.Len(), fmt.Sprintf("%d", resp.StatusCode))
 	return resp, nil
 }
 
